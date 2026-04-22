@@ -1,0 +1,22 @@
+{
+  "diff": "diff --git a/src/erp_petshop/features/agendamento/service.py b/src/erp_petshop/features/agendamento/service.py\n--- /dev/null\n+++ b/src/erp_petshop/features/agendamento/service.py\n@@\n+from __future__ import annotations\n+\n+from datetime import datetime, timezone\n+from uuid import UUID\n+\n+from sqlalchemy.ext.asyncio import AsyncSession\n+\n+from erp_petshop.core.errors import ConflictError\n+from erp_petshop.features.agendamento import repo, scheduler\n+from erp_petshop.features.agendamento.models import Agendamento\n+\n+\n+class SlotOcupadoError(ConflictError):\n+    pass\n+\n+\n+async def criar_agendamento(\n+    session: AsyncSession,\n+    *,\n+    pet_id: UUID,\n+    cliente_id: UUID,\n+    servico_id: UUID,\n+    slot_inicio: datetime,\n+    preco_cents: int,\n+    observacoes: str | None,\n+    agora: datetime | None = None,\n+) -> Agendamento:\n+    agora = agora or datetime.now(timezone.utc)\n+    slot = scheduler.normaliza_slot(slot_inicio)\n+    scheduler.valida_nao_retroativo(slot, agora)\n+    if await repo.slot_ocupado(session, slot):\n+        raise SlotOcupadoError(f'slot {slot.isoformat()} ja ocupado')\n+    try:\n+        return await repo.criar(\n+            session,\n+            pet_id=pet_id,\n+            cliente_id=cliente_id,\n+            servico_id=servico_id,\n+            slot_inicio=slot,\n+            preco_cents=preco_cents,\n+            observacoes=observacoes,\n+        )\n+    except repo.SlotUniqueViolation as exc:\n+        raise SlotOcupadoError(str(exc)) from exc",
+  "spec": "Implementar criar_agendamento respeitando slot fixo de 30min com defense in depth: (1) rejeitar slot desalinhado via scheduler.normaliza_slot (regra pura), (2) rejeitar slot retroativo alem de 5min via scheduler.valida_nao_retroativo, (3) checar slot ocupado pre-insert via repo.slot_ocupado filtrando status != CANCELADO, (4) traduzir IntegrityError do partial unique index em SlotOcupadoError. Nenhuma dependencia de SQLAlchemy em scheduler. Inject 'agora' permite teste deterministico.",
+  "harness_rules": [
+    "Vertical Slices: agendamento em features/agendamento/, proibido import de models de outras features",
+    "Regras puras (scheduler, state_machine) sem dependencia de SQLAlchemy",
+    "Import inter-feature so via package root (features/<outra> import service)",
+    "No TODO sem issue associada",
+    "File length limits: warn 400, block 600"
+  ],
+  "existing_code": "# Slice novo. Dependencias do repo (features/agendamento/repo.py):\n#   async def slot_ocupado(session, slot) -> bool  # filtra status != CANCELADO\n#   async def criar(session, **kwargs) -> Agendamento  # pode levantar SlotUniqueViolation\n#   class SlotUniqueViolation(Exception)  # traducao de IntegrityError do partial index\n#\n# Dependencias do scheduler (features/agendamento/scheduler.py):\n#   SLOT_MINUTES = 30\n#   RETRO_TOLERANCE = timedelta(minutes=5)\n#   def normaliza_slot(dt: datetime) -> datetime  # rejeita desalinhado/naive\n#   def valida_nao_retroativo(slot: datetime, agora: datetime) -> None",
+  "feature_path": "src/erp_petshop/features/agendamento/",
+  "expected_verdict": "pass",
+  "expected_flags": {
+    "lob_violation": false,
+    "duplication": false,
+    "type_contract_violation": false,
+    "unjustified_complexity": false,
+    "spec_fulfilled": "yes"
+  },
+  "notes": "Golden pass: concorrencia tratada em 3 camadas (normaliza puro + check pre-insert + partial unique como race safety net traduzida em SlotOcupadoError). Locality of Behavior preservada — tudo sob features/agendamento/. Injecao de 'agora' via kwarg permite teste deterministico de horario retroativo sem monkeypatch. Sem imports de Model de outras features (pet/cliente/servico sao resolvidos no service layer do slice que consome este criar_agendamento, nao aqui)."
+}
